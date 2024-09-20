@@ -1,4 +1,4 @@
-#cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.29)
 project(nn LANGUAGES CXX CUDA)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -13,9 +13,8 @@ set(CMAKE_CUDA_STANDARD ${CMAKE_CXX_STANDARD})
 set(CMAKE_CUDA_STANDARD_REQUIRED ${CMAKE_CXX_STANDARD_REQUIRED})
 set(CMAKE_CUDA_EXTENSIONS ${CMAKE_CXX_EXTENSIONS})
 
-list(APPEND TEST_COMPILE_OPTIONS -Xptxas=-v)
-#list(APPEND TEST_COMPILE_OPTIONS -maxrregcount 128)
-list(APPEND TEST_COMPILE_OPTIONS -gencode arch=compute_86,code=sm_86)
+list(APPEND NVCC_OPTIONS -Xptxas=-v)
 
 add_executable(test test.cu)
-target_compile_options(test PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${TEST_COMPILE_OPTIONS}>)
+set_property(TARGET test PROPERTY CUDA_ARCHITECTURES 86-real 86-virtual)
+target_compile_options(test PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${NVCC_OPTIONS}>)
