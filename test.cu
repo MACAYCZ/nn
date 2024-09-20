@@ -11,80 +11,64 @@
 #define ASSERT_CUDA_ERROR() \
 	do { \
 		cudaDeviceSynchronize(); \
-		if (cudaPeekAtLastError()) { \
+		if (cudaPeekAtLastError() != cudaSuccess) \
+		{ \
 			std::cerr << __FILE__ << ":" << __LINE__ << ": " << cudaGetErrorString(cudaGetLastError()) << std::endl; \
 			exit(EXIT_FAILURE); \
 		} \
 	} while (0)
 
-static __global__ void init_random_state(curandState *state, unsigned long seed)
-{
-	curand_init(seed, CUDA_THREAD_INDEX, 0, &state[CUDA_THREAD_INDEX]);
-}
+constexpr std::uint32_t n_in = 64;
+constexpr std::uint32_t n_out = 40*32;
+constexpr std::uint32_t batch_sz = 4096;
+constexpr std::uint32_t n_epochs = 10;
 
-static __global__ void randomize_array(curandState *state, float *array, std::uint32_t size)
+static_assert(n_out % 40 == 0);
+
+template <std::uint32_t N_IN>
+static __global__ void forward_fixed_layer(
+	const float *_weights,
+	const float *in,
+	float *out,
+	std::uint32_t batch_sz)
 {
-	for (std::uint32_t i = CUDA_THREAD_INDEX; i < size; i += CUDA_THREAD_COUNT)
+	const float *weights = _weights + CUDA_THREAD_INDEX * N_IN;
+	for (std::uint32_t i = 0; i < batch_sz; i++)
 	{
-		array[i] = curand_uniform(&state[CUDA_THREAD_INDEX]);
+		float result = 0.0f;
+		#pragma unroll
+		for (std::uint32_t j = 0; j < N_IN; j++)
+		{
+			result += weights[j] * in[j];
+		}
+		// TODO(petr): Remove the hardcoding of this activation function.
+		result = tanhf(result);
+		out[CUDA_THREAD_INDEX] += result;
+		in += N_IN;
+		out += CUDA_THREAD_COUNT;
 	}
 }
-
-float *get_random_array(std::uint32_t size)
-{
-	static curandState *state = nullptr;
-	constexpr std::size_t threads = 64;
-	if (!state)
-	{
-		cudaMalloc(&state, threads * sizeof(*state));
-//		unsigned long seed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-		unsigned long seed = 1234;
-		init_random_state<<<1, threads>>>(state, seed);
-	}
-	float *result;
-	cudaMalloc(&result, size * sizeof(*result));
-	randomize_array<<<1, threads>>>(state, result, size);
-	return result;
-}
-
-class Layer
-{
-public:
-	Layer(std::uint32_t n_in, std::uint32_t n_out)
-		: n_in(n_in)
-		, n_out(n_out)
-	{
-		this->weights = get_random_array(n_out * n_in);
-		this->biases = get_random_array(n_out);
-	}
-
-	~Layer()
-	{
-		cudaFree(this->weights);
-		cudaFree(this->biases);
-	}
-
-private:
-	std::uint32_t n_in;
-	std::uint32_t n_out;
-	float *weights;
-	float *biases;
-};
-
-// TODO(petr): It probably won't be necessary to use 32-bit integers everywhere, since it would be better to have kernels that compute a fixed number of 'things.'.
-// Asynchronously copy biases into the result array, and then compute the weights in parallel.
 
 int main(void)
 {
-	Layer layer(10, 10);
+	float *biases;
+	float *weights;
+	float *in;
+	float *out;
+	cudaMalloc(&biases, n_out * sizeof(*biases));
+	cudaMalloc(&weights, n_out * n_in * sizeof(*weights));
+	cudaMalloc(&in, n_in * batch_sz * sizeof(*in));
+	cudaMalloc(&out, n_out * batch_sz * sizeof(*out));
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 
 	cudaEventRecord(start);
-	for (std::size_t epoch = 0; epoch < 10; epoch++)
+	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
+		cudaMemcpyAsync(out, biases, n_out * sizeof(*biases), cudaMemcpyDeviceToDevice);
+		forward_fixed_layer<n_in><<<40, n_out / 40>>>(weights, in, out, batch_sz);
 	}
 	cudaEventRecord(stop);
 	ASSERT_CUDA_ERROR();
@@ -93,5 +77,6 @@ int main(void)
 	cudaEventElapsedTime(&milliseconds, start, stop);
 	std::cout << "Elapsed time: " << milliseconds << "ms" << std::endl;
 
+	cudaFree(out);
 	return 0;
 }
