@@ -14,38 +14,53 @@
 		if (cudaPeekAtLastError() != cudaSuccess) \
 		{ \
 			std::cerr << __FILE__ << ":" << __LINE__ << ": " << cudaGetErrorString(cudaGetLastError()) << std::endl; \
-			exit(EXIT_FAILURE); \
+			std::exit(EXIT_FAILURE); \
 		} \
 	} while (0)
 
-constexpr std::uint32_t n_in = 64;
-constexpr std::uint32_t n_out = 40*32;
+constexpr std::uint32_t n_in = 128;
+constexpr std::uint32_t n_out = 40*128;
 constexpr std::uint32_t batch_sz = 4096;
-constexpr std::uint32_t n_epochs = 10;
-
+constexpr std::uint32_t n_epochs = 100;
 static_assert(n_out % 40 == 0);
 
+//
+// N_IN represents the size of the previous layer, while the number of threads
+// corresponds to the size of the current layer.
+// Ensure that N_IN * 4 is less than the available shared memory capacity.
+//
 template <std::uint32_t N_IN>
 static __global__ void forward_fixed_layer(
-	const float *_weights,
-	const float *in,
-	float *out,
-	std::uint32_t batch_sz)
+	const float *__restrict__ _weights,
+	const float *__restrict__ in,
+	float *__restrict__ out,
+	const std::uint32_t batch_sz)
 {
+	__shared__ float shrd_in[N_IN];
 	const float *weights = _weights + CUDA_THREAD_INDEX * N_IN;
 	for (std::uint32_t i = 0; i < batch_sz; i++)
 	{
+		// TODO(petr): It might be a good idea to make threadIdx.x equal to N_IN.
+		for (std::uint32_t j = threadIdx.x; j < N_IN; j += blockDim.x)
+		{
+			shrd_in[j] = in[j];
+		}
+		__syncthreads();
+
 		float result = 0.0f;
 		#pragma unroll
 		for (std::uint32_t j = 0; j < N_IN; j++)
 		{
-			result += weights[j] * in[j];
+			result += weights[j] * shrd_in[j];
 		}
+
 		// TODO(petr): Remove the hardcoding of this activation function.
 		result = tanhf(result);
 		out[CUDA_THREAD_INDEX] += result;
 		in += N_IN;
 		out += CUDA_THREAD_COUNT;
+
+		__syncthreads();
 	}
 }
 
