@@ -19,15 +19,17 @@
 	} while (0)
 
 constexpr std::uint32_t n_in = 128;
-constexpr std::uint32_t n_out = 40*128;
+constexpr std::uint32_t n_out = 40*n_in;
 constexpr std::uint32_t batch_sz = 4096;
 constexpr std::uint32_t n_epochs = 100;
 static_assert(n_out % 40 == 0);
+static_assert(n_in == n_out / 40);
 
 //
 // N_IN represents the size of the previous layer, while the number of threads
 // corresponds to the size of the current layer.
 // Ensure that N_IN * 4 is less than the available shared memory capacity.
+// N_IN has to be equal to the number of threads per block.
 //
 template <std::uint32_t N_IN>
 static __global__ void forward_fixed_layer(
@@ -40,14 +42,12 @@ static __global__ void forward_fixed_layer(
 	const float *weights = _weights + CUDA_THREAD_INDEX * N_IN;
 	for (std::uint32_t i = 0; i < batch_sz; i++)
 	{
-		// TODO(petr): It might be a good idea to make threadIdx.x equal to N_IN.
-		for (std::uint32_t j = threadIdx.x; j < N_IN; j += blockDim.x)
-		{
-			shrd_in[j] = in[j];
-		}
+		float result = out[CUDA_THREAD_INDEX];
+
+		__syncthreads();
+		shrd_in[threadIdx.x] = in[threadIdx.x];
 		__syncthreads();
 
-		float result = 0.0f;
 		#pragma unroll
 		for (std::uint32_t j = 0; j < N_IN; j++)
 		{
@@ -56,11 +56,9 @@ static __global__ void forward_fixed_layer(
 
 		// TODO(petr): Remove the hardcoding of this activation function.
 		result = tanhf(result);
-		out[CUDA_THREAD_INDEX] += result;
+		out[CUDA_THREAD_INDEX] = result;
 		in += N_IN;
 		out += CUDA_THREAD_COUNT;
-
-		__syncthreads();
 	}
 }
 
@@ -82,6 +80,7 @@ int main(void)
 	cudaEventRecord(start);
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
+		// TODO(petr): This isn't correct!
 		cudaMemcpyAsync(out, biases, n_out * sizeof(*biases), cudaMemcpyDeviceToDevice);
 		forward_fixed_layer<n_in><<<40, n_out / 40>>>(weights, in, out, batch_sz);
 	}
@@ -92,6 +91,5 @@ int main(void)
 	cudaEventElapsedTime(&milliseconds, start, stop);
 	std::cout << "Elapsed time: " << milliseconds << "ms" << std::endl;
 
-	cudaFree(out);
 	return 0;
 }
