@@ -23,6 +23,22 @@ using namespace nvcuda;
 
 static __device__ __forceinline__ float _activation_stub(float x) { return x; }
 
+// TODO(petr): It would probably make sense to calculate the loss inside this function.
+// n_out * batch_sz needs to fit inside std::uint32_t.
+template <float(*IN_ACTIVATION)(float) = _activation_stub>
+static __global__ void backward_mse(
+	const float *__restrict__ out,
+	const float *__restrict__ expected,
+	float *__restrict__ gradients,
+	const std::uint32_t n_out,
+	const std::uint32_t batch_sz)
+{
+	for (std::uint32_t i = CUDA_THREAD_INDEX; i < n_out * batch_sz; i += CUDA_THREAD_COUNT)
+	{
+		gradients[i] = 2.0f * (IN_ACTIVATION(out[i]) - expected[i]) / batch_sz;
+	}
+}
+
 //
 // N_IN represents the size of the previous layer, while the number of threads
 // corresponds to the size of the current layer.
@@ -119,8 +135,6 @@ static __global__ void update_fixed_layer(
 	__shared__ float shrd_in[N_IN];
 	for (std::uint32_t i = 0; i < batch_sz; i++)
 	{
-		// TODO(petr): I should probably average the gradients, possibly by dividing them by batch_sz.
-		// This could also be achieved by doing the same in the cost calculation.
 		float gradient = gradients[CUDA_THREAD_INDEX] * learning_rate;
 
 		__syncthreads();
