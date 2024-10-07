@@ -98,12 +98,15 @@ static void forward_layer(
 	{
 		for (std::uint32_t j = 0; j < n_in; j += N_IN)
 		{
-			forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(biases, weights + j, in + j, n_in, out, n_out, batch_sz);
+			forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
+				&biases[i],
+				&weights[i + j],
+				&in[i + j],
+				n_in,
+				&out[i],
+				n_out,
+				batch_sz);
 		}
-		biases += 40*N_IN;
-		weights += n_in * 40*N_IN;
-		in += n_in * 40*N_IN;
-		out += 40*N_IN;
 	}
 }
 
