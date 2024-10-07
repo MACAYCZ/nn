@@ -1,3 +1,4 @@
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -45,34 +46,64 @@ static __global__ void backward_mse(
 // Ensure that N_IN * 4 is less than the available shared memory capacity.
 // N_IN has to be equal to the number of threads per block.
 //
-template <std::uint32_t N_IN, float(*IN_ACTIVATION)(float) = _activation_stub>
+template <std::uint32_t N_IN, float(*IN_ACTIVATION)(float)>
 static __global__ void forward_fixed_layer(
 	const float *__restrict__ biases,
 	const float *__restrict__ weights,
 	const float *__restrict__ in,
+	const std::uint32_t n_in,
 	float *__restrict__ out,
+	const std::uint32_t n_out,
 	const std::uint32_t batch_sz)
 {
-	__shared__ float shrd_in[N_IN];
-	const float bias = biases[CUDA_THREAD_INDEX];
-	weights += CUDA_THREAD_INDEX * N_IN;
-	for (std::uint32_t i = 0; i < batch_sz; i++)
+	if (CUDA_THREAD_INDEX < n_out)
 	{
-		float result = bias;
-
-		__syncthreads();
-		shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
-		__syncthreads();
-
-		#pragma unroll
-		for (std::uint32_t j = 0; j < N_IN; j++)
+		__shared__ float shrd_in[N_IN];
+		const float bias = biases[CUDA_THREAD_INDEX];
+		weights += CUDA_THREAD_INDEX * n_in;
+		for (std::uint32_t i = 0; i < batch_sz; i++)
 		{
-			result += weights[j] * shrd_in[j];
-		}
+			float result = bias;
 
-		out[CUDA_THREAD_INDEX] = result;
-		in += N_IN;
-		out += CUDA_THREAD_COUNT;
+			__syncthreads();
+			shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
+			__syncthreads();
+
+			#pragma unroll
+			for (std::uint32_t j = 0; j < N_IN; j++)
+			{
+				result += weights[j] * shrd_in[j];
+			}
+
+			out[CUDA_THREAD_INDEX] = result;
+			in += n_in;
+			out += CUDA_THREAD_COUNT;
+		}
+	}
+}
+
+template <float(*IN_ACTIVATION)(float) = _activation_stub>
+static void forward_layer(
+	const float *__restrict__ biases,
+	const float *__restrict__ weights,
+	const float *__restrict__ in,
+	const std::uint32_t n_in,
+	float *__restrict__ out,
+	const std::uint32_t n_out,
+	const std::uint32_t batch_sz)
+{
+	constexpr std::uint32_t N_IN = 128;
+	assert(n_in % N_IN == 0);
+	for (std::uint32_t i = 0; i < n_out; i += 40*N_IN)
+	{
+		for (std::uint32_t j = 0; j < n_in; j += N_IN)
+		{
+			forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(biases, weights + j, in + j, n_in, out, n_out, batch_sz);
+		}
+		biases += 40*N_IN;
+		weights += n_in * 40*N_IN;
+		in += n_in * 40*N_IN;
+		out += 40*N_IN;
 	}
 }
 
@@ -185,6 +216,7 @@ int main(void)
 	cudaEventRecord(start);
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
+		forward_layer<>(biases, weights, in, n_in, out, n_out, batch_sz);
 	}
 	cudaEventRecord(stop);
 	ASSERT_CUDA_ERROR();
