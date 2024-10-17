@@ -51,19 +51,22 @@ static __global__ void forward_fixed_layer(
 	const float *__restrict__ biases,
 	const float *__restrict__ weights,
 	const float *__restrict__ in,
-	const std::uint32_t n_in,
+	const std::uint32_t in_stride,
 	float *__restrict__ out,
 	const std::uint32_t n_out,
-	const std::uint32_t batch_sz)
+	const std::uint32_t out_stride,
+	const std::uint32_t batch_sz,
+	const bool use_biases)
 {
 	if (CUDA_THREAD_INDEX < n_out)
 	{
 		__shared__ float shrd_in[N_IN];
-		const float bias = biases[CUDA_THREAD_INDEX];
-		weights += CUDA_THREAD_INDEX * n_in;
+		weights += CUDA_THREAD_INDEX * in_stride;
 		for (std::uint32_t i = 0; i < batch_sz; i++)
 		{
-			float result = bias;
+			float result = use_biases
+				? biases[CUDA_THREAD_INDEX]
+				: out[CUDA_THREAD_INDEX];
 
 			__syncthreads();
 			shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
@@ -76,12 +79,15 @@ static __global__ void forward_fixed_layer(
 			}
 
 			out[CUDA_THREAD_INDEX] = result;
-			in += n_in;
-			out += CUDA_THREAD_COUNT;
+			in += in_stride;
+			out += out_stride;
 		}
 	}
 }
 
+//
+// Each input and the weights of every neuron need to be aligned to N_IN floats.
+//
 template <float(*IN_ACTIVATION)(float) = _activation_stub>
 static void forward_layer(
 	const float *__restrict__ biases,
@@ -100,12 +106,14 @@ static void forward_layer(
 		{
 			forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
 				&biases[i],
-				&weights[i + j],
-				&in[i + j],
-				n_in,
+				&weights[i * n_in + j],
+				&in[i * n_in + j],
+				(n_in + N_IN - 1) / N_IN * N_IN,
 				&out[i],
+				n_out - i,
 				n_out,
-				batch_sz);
+				batch_sz,
+				!j);
 		}
 	}
 }
@@ -188,18 +196,16 @@ static __global__ void update_fixed_layer(
 	biases[CUDA_THREAD_INDEX] = bias;
 }
 
-// TODO(petr): Compute the entire layer, not just a fixed one.
-// TODO(petr): Paralelize batch if the layer is too small.
 // TODO(petr): Utilize tensor cores for the machine learning.
+// TODO(petr): Try to compute the entire MLP within a single kernel.
 
 int main(void)
 {
-	constexpr std::uint32_t n_in = 128;
-	constexpr std::uint32_t n_out = 40*n_in;
-	constexpr std::uint32_t batch_sz = 4096;
-	constexpr std::uint32_t n_epochs = 100;
-	static_assert(n_out % 40 == 0);
-	static_assert(n_in == n_out / 40);
+	std::uint32_t n_in = 128;
+	assert(n_in % 128 == 0);
+	std::uint32_t n_out = 40*n_in;
+	std::uint32_t batch_sz = 4096;
+	std::uint32_t n_epochs = 100;
 
 	float *biases;
 	float *weights;
