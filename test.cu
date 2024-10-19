@@ -136,31 +136,37 @@ static __global__ void update_fixed_layer(
 	float *__restrict__ weights,
 	float *__restrict__ gradients,
 	const float *__restrict__ in,
+	const std::uint32_t in_stride,
+	const std::uint32_t n_out,
+	const std::uint32_t out_stride,
 	const float learning_rate,
 	const std::uint32_t batch_sz)
 {
-	float bias = biases[CUDA_THREAD_INDEX];
-	weights += CUDA_THREAD_INDEX * N_IN;
-	__shared__ float shrd_in[N_IN];
-	for (std::uint32_t i = 0; i < batch_sz; i++)
+	if (CUDA_THREAD_INDEX < n_out)
 	{
-		float gradient = gradients[CUDA_THREAD_INDEX] * learning_rate;
-
-		__syncthreads();
-		shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
-		__syncthreads();
-
-		#pragma unroll
-		for (std::uint32_t j = 0; j < N_IN; j++)
+		float bias = biases[CUDA_THREAD_INDEX];
+		weights += CUDA_THREAD_INDEX * in_stride;
+		__shared__ float shrd_in[N_IN];
+		for (std::uint32_t i = 0; i < batch_sz; i++)
 		{
-			weights[j] -= shrd_in[j] * gradient;
-		}
+			float gradient = gradients[CUDA_THREAD_INDEX] * learning_rate;
 
-		bias -= gradient;
-		in += N_IN;
-		gradients += CUDA_THREAD_COUNT;
+			__syncthreads();
+			shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
+			__syncthreads();
+
+			#pragma unroll
+			for (std::uint32_t j = 0; j < N_IN; j++)
+			{
+				weights[j] -= shrd_in[j] * gradient;
+			}
+
+			bias -= gradient;
+			in += in_stride;
+			gradients += out_stride;
+		}
+		biases[CUDA_THREAD_INDEX] = bias;
 	}
-	biases[CUDA_THREAD_INDEX] = bias;
 }
 
 // TODO(petr): Utilize tensor cores for the machine learning.
@@ -193,15 +199,14 @@ public:
 
 	// TODO(petr): Pass the input activation as a function argument, instead of a template argument.
 	template <float(*IN_ACTIVATION)(float) = _activation_stub>
-	const float *forward(const float *in)
+	const float *forward(const float *__restrict__ in)
 	{
 		constexpr std::uint32_t N_IN = 128;
 		std::uint32_t aligned_n_in = (n_in + 127) & ~127;
-		assert(this->n_in % N_IN == 0);
 
 		for (std::uint32_t i = 0; i < this->n_out; i += 40*N_IN)
 		{
-			for (std::uint32_t j = 0; j < this->n_in; j += N_IN)
+			for (std::uint32_t j = 0; j < aligned_n_in; j += N_IN)
 			{
 				forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
 					&this->biases[i],
@@ -217,6 +222,32 @@ public:
 		}
 
 		return this->out;
+	}
+
+	template <float(*IN_ACTIVATION_GRADIENT)(float) = _activation_stub>
+	void backward(const float *__restrict__ in, const float learning_rate)
+	{
+		// TODO(petr): Call backward_fixed_layer
+
+		constexpr std::uint32_t N_IN = 128;
+		std::uint32_t aligned_n_in = (n_in + 127) & ~127;
+
+		for (std::uint32_t i = 0; i < this->n_out; i += 40*N_IN)
+		{
+			for (std::uint32_t j = 0; j < aligned_n_in; j += N_IN)
+			{
+				update_fixed_layer<N_IN, IN_ACTIVATION_GRADIENT><<<40, N_IN>>>(
+					&this->biases[i],
+					&this->weights[i * aligned_n_in + j],
+					&this->gradients[i],
+					&in[i * aligned_n_in + j],
+					aligned_n_in,
+					this->n_out - i,
+					this->n_out,
+					learning_rate,
+					this->batch_sz);
+			}
+		}
 	}
 
 private:
@@ -248,7 +279,8 @@ int main(void)
 	cudaEventRecord(start);
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
-		layer.forward<>(in);
+//		layer.forward<>(in);
+		layer.backward<>(in, 0.1f);
 	}
 	cudaEventRecord(stop);
 	ASSERT_CUDA_ERROR();
