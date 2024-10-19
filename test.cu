@@ -86,39 +86,6 @@ static __global__ void forward_fixed_layer(
 }
 
 //
-// Each input and the weights of every neuron need to be aligned to N_IN floats.
-//
-template <float(*IN_ACTIVATION)(float) = _activation_stub>
-static void forward_layer(
-	const float *__restrict__ biases,
-	const float *__restrict__ weights,
-	const float *__restrict__ in,
-	const std::uint32_t n_in,
-	float *__restrict__ out,
-	const std::uint32_t n_out,
-	const std::uint32_t batch_sz)
-{
-	constexpr std::uint32_t N_IN = 128;
-	assert(n_in % N_IN == 0);
-	for (std::uint32_t i = 0; i < n_out; i += 40*N_IN)
-	{
-		for (std::uint32_t j = 0; j < n_in; j += N_IN)
-		{
-			forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
-				&biases[i],
-				&weights[i * n_in + j],
-				&in[i * n_in + j],
-				(n_in + N_IN - 1) / N_IN * N_IN,
-				&out[i],
-				n_out - i,
-				n_out,
-				batch_sz,
-				!j);
-		}
-	}
-}
-
-//
 // N_OUT represents the size of the current layer, while the number of threads
 // corresponds to the size of the previous layer.
 // Ensure that N_OUT * 4 is less than the available shared memory capacity.
@@ -199,24 +166,80 @@ static __global__ void update_fixed_layer(
 // TODO(petr): Utilize tensor cores for the machine learning.
 // TODO(petr): Try to compute the entire MLP within a single kernel.
 
+class Layer
+{
+public:
+	Layer(std::uint32_t n_in, std::uint32_t n_out, std::uint32_t batch_sz)
+		: n_in(n_in)
+		, n_out(n_out)
+		, batch_sz(batch_sz)
+	{
+		std::uint32_t aligned_n_in = (n_in + 127) & ~127;
+//		std::uint32_t aligned_n_out = (n_out + 127) & ~127;
+
+		cudaMalloc(&this->biases, n_out * sizeof(*this->biases));
+		cudaMalloc(&this->weights, n_out * aligned_n_in * sizeof(*this->weights));
+		cudaMalloc(&this->out, n_out * batch_sz * sizeof(*this->out));
+		cudaMalloc(&this->gradients, n_out * this->batch_sz * sizeof(*this->gradients));
+	}
+
+	~Layer()
+	{
+		cudaFree(&this->biases);
+		cudaFree(&this->weights);
+		cudaFree(&this->out);
+		cudaFree(&this->gradients);
+	}
+
+	// TODO(petr): Pass the input activation as a function argument, instead of a template argument.
+	template <float(*IN_ACTIVATION)(float) = _activation_stub>
+	const float *forward(const float *in)
+	{
+		constexpr std::uint32_t N_IN = 128;
+		std::uint32_t aligned_n_in = (n_in + 127) & ~127;
+		assert(this->n_in % N_IN == 0);
+
+		for (std::uint32_t i = 0; i < this->n_out; i += 40*N_IN)
+		{
+			for (std::uint32_t j = 0; j < this->n_in; j += N_IN)
+			{
+				forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
+					&this->biases[i],
+					&this->weights[i * aligned_n_in + j],
+					&in[i * aligned_n_in + j],
+					aligned_n_in,
+					&this->out[i],
+					this->n_out - i,
+					this->n_out,
+					this->batch_sz,
+					!j);
+			}
+		}
+
+		return this->out;
+	}
+
+private:
+	std::uint32_t n_in;
+	std::uint32_t n_out;
+	std::uint32_t batch_sz;
+	float *biases;
+	float *weights;
+	float *out;
+	float *gradients;
+};
+
 int main(void)
 {
 	std::uint32_t n_in = 128;
-	assert(n_in % 128 == 0);
 	std::uint32_t n_out = 40*n_in;
 	std::uint32_t batch_sz = 4096;
 	std::uint32_t n_epochs = 100;
+	Layer layer(n_in, n_out, batch_sz);
 
-	float *biases;
-	float *weights;
+	// TODO(petr): Make the input allocation more convenient.
 	float *in;
-	float *out;
-	float *gradients;
-	cudaMalloc(&biases, n_out * sizeof(*biases));
-	cudaMalloc(&weights, n_out * n_in * sizeof(*weights));
-	cudaMalloc(&in, n_in * batch_sz * sizeof(*in));
-	cudaMalloc(&out, n_out * batch_sz * sizeof(*out));
-	cudaMalloc(&gradients, n_out * batch_sz * sizeof(*gradients));
+	cudaMalloc(&in, ((n_in + 127) & ~127) * batch_sz * sizeof(*in));
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -225,7 +248,7 @@ int main(void)
 	cudaEventRecord(start);
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
-		forward_layer<>(biases, weights, in, n_in, out, n_out, batch_sz);
+		layer.forward<>(in);
 	}
 	cudaEventRecord(stop);
 	ASSERT_CUDA_ERROR();
