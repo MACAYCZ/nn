@@ -87,7 +87,7 @@ public:
 
 		cudaMalloc(&this->biases, n_out * sizeof(*this->biases));
 		cudaMalloc(&this->weights, n_out * in_stride * sizeof(*this->weights));
-		cudaMalloc(&this->out, n_out * batch_sz * sizeof(*this->out));
+		cudaMalloc(&this->out, n_out * this->batch_sz * sizeof(*this->out));
 		cudaMalloc(&this->gradients, n_out * this->batch_sz * sizeof(*this->gradients));
 	}
 
@@ -161,6 +161,7 @@ int main(void)
 	cudaEventRecord(stop);
 
 	float milliseconds = 0;
+	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&milliseconds, start, stop);
 	std::cout << "Elapsed time: " << milliseconds << "ms" << std::endl;
 
