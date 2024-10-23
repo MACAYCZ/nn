@@ -46,12 +46,13 @@ static __global__ void forward_fixed_layer(
 	weights += (out_off + CUDA_THREAD_INDEX) * in_stride + in_off;
 	out += out_off + CUDA_THREAD_INDEX;
 
+	// TODO(petr): Loop through all neurons, instead of performing an out-of-bounds check.
 	if (out_off + CUDA_THREAD_INDEX < out_stride)
 	{
 		const float bias = biases[out_off + CUDA_THREAD_INDEX];
 		for (std::uint32_t i = 0; i < batch_sz; i++)
 		{
-			float result = in_off ? bias : *out;
+			float result = in_off ? *out : bias;
 
 			__syncthreads();
 			shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
@@ -72,6 +73,7 @@ static __global__ void forward_fixed_layer(
 
 // TODO(petr): Utilize tensor cores for the machine learning.
 // TODO(petr): Try to compute the entire MLP within a single kernel.
+// TODO(petr): Try to use expression templates for constructing the neural network.
 
 class Layer
 {
@@ -102,25 +104,26 @@ public:
 	const float *forward(const float *__restrict__ in)
 	{
 		constexpr std::uint32_t N_IN = 128;
-		std::uint32_t in_stride = (n_in + 127) & ~127;
+		std::uint32_t in_stride = (this->n_in + 127) & ~127;
 
-		for (std::uint32_t i = 0; i < this->n_out; i += 40*N_IN)
+		for (std::uint32_t out_off = 0; out_off < this->n_out; out_off += 40*N_IN)
 		{
-			for (std::uint32_t j = 0; j < in_stride; j += N_IN)
+			for (std::uint32_t in_off = 0; in_off < in_stride; in_off += N_IN)
 			{
 				forward_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
 					this->biases,
 					this->weights,
 					in,
 					in_stride,
-					j,
+					in_off,
 					this->out,
 					this->n_out,
-					i,
+					out_off,
 					this->batch_sz);
 			}
 		}
 
+		ASSERT_CUDA_ERROR();
 		return this->out;
 	}
 
@@ -156,7 +159,6 @@ int main(void)
 		layer.forward<>(in);
 	}
 	cudaEventRecord(stop);
-	ASSERT_CUDA_ERROR();
 
 	float milliseconds = 0;
 	cudaEventElapsedTime(&milliseconds, start, stop);
