@@ -123,6 +123,54 @@ static __global__ void backward_fixed_layer(
 	}
 }
 
+//
+// N_IN represents the size of the previous layer, while the number of threads
+// corresponds to the size of the current layer.
+// Ensure that N_IN * 4 is less than the available shared memory capacity.
+// N_IN has to be equal to the number of threads per block.
+//
+template <std::uint32_t N_IN, float(*IN_ACTIVATION)(float) = _activation_stub>
+static __global__ void update_fixed_layer(
+	float *__restrict__ biases,
+	float *__restrict__ weights,
+	const float *__restrict__ gradients,
+	const float *__restrict__ in,
+	const std::uint32_t in_stride,
+	const std::uint32_t in_off,
+	const std::uint32_t out_stride,
+	const std::uint32_t out_off,
+	const float learning_rate,
+	const std::uint32_t batch_sz)
+{
+	__shared__ float shrd_in[N_IN];
+	weights += (out_off + CUDA_THREAD_INDEX) * in_stride + in_off;
+	in += in_off;
+
+	if (out_off + CUDA_THREAD_INDEX < out_stride)
+	{
+		float bias = biases[out_off + CUDA_THREAD_INDEX];
+		for (std::uint32_t i = 0; i < batch_sz; i++)
+		{
+			float gradient = gradients[CUDA_THREAD_INDEX] * learning_rate;
+
+			__syncthreads();
+			shrd_in[threadIdx.x] = IN_ACTIVATION(in[threadIdx.x]);
+			__syncthreads();
+
+			#pragma unroll
+			for (std::uint32_t j = 0; j < N_IN; j++)
+			{
+				weights[j] -= shrd_in[j] * gradient;
+			}
+
+			bias -= gradient;
+			in += in_stride;
+			gradients += out_stride;
+		}
+		biases[out_off + CUDA_THREAD_INDEX] = bias;
+	}
+}
+
 // TODO(petr): Utilize tensor cores for the machine learning.
 // TODO(petr): Try to compute the entire MLP within a single kernel.
 // TODO(petr): Try to use expression templates for constructing the neural network.
@@ -136,11 +184,14 @@ public:
 		, batch_sz(batch_sz)
 	{
 		std::uint32_t in_stride = (n_in + 127) & ~127;
+		std::uint32_t out_stride = (n_out + 127) & ~127;
 
+		// TODO(petr): Randomize weights and biases.
+		// TODO(petr): Are there correctly allocated?
 		cudaMalloc(&this->biases, n_out * sizeof(*this->biases));
 		cudaMalloc(&this->weights, n_out * in_stride * sizeof(*this->weights));
 		cudaMalloc(&this->out, n_out * this->batch_sz * sizeof(*this->out));
-		cudaMalloc(&this->gradients, n_out * this->batch_sz * sizeof(*this->gradients));
+		cudaMalloc(&this->gradients, out_stride * this->batch_sz * sizeof(*this->gradients));
 	}
 
 	~Layer()
@@ -206,6 +257,34 @@ public:
 		ASSERT_CUDA_ERROR();
 	}
 
+	template <float(*IN_ACTIVATION)(float) = _activation_stub>
+	void update(const float *__restrict__ in, float learning_rate)
+	{
+		constexpr std::uint32_t N_IN = 128;
+		std::uint32_t in_stride = (this->n_in + 127) & ~127;
+		std::uint32_t out_stride = (this->n_in + 127) & ~127;
+
+		for (std::uint32_t out_off = 0; out_off < this->n_out; out_off += 40*N_IN)
+		{
+			for (std::uint32_t in_off = 0; in_off < this->n_in; in_off += N_IN)
+			{
+				update_fixed_layer<N_IN, IN_ACTIVATION><<<40, N_IN>>>(
+					this->biases,
+					this->weights,
+					this->gradients,
+					in,
+					in_stride,
+					in_off,
+					out_stride,
+					out_off,
+					learning_rate,
+					this->batch_sz);
+			}
+		}
+
+		ASSERT_CUDA_ERROR();
+	}
+
 private:
 	std::uint32_t n_in;
 	std::uint32_t n_out;
@@ -237,7 +316,8 @@ int main(void)
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
 //		layer.forward<>(in);
-		layer.backward<>(in_layer);
+//		layer.backward<>(in_layer);
+		layer.update<>(in, 0.1f);
 	}
 	cudaEventRecord(stop);
 
