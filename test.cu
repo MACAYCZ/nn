@@ -173,8 +173,9 @@ static __global__ void update_fixed_layer(
 
 // TODO(petr): Utilize tensor cores for the machine learning.
 // TODO(petr): Try to compute the entire MLP within a single kernel.
-// TODO(petr): Try to use expression templates for constructing the neural network.
 
+// TODO(petr): Pass the activation function dynamically.
+template <float(*IN_ACTIVATION)(float) = _activation_stub, float(*IN_ACTIVATION_GRADIENT)(float) = _activation_stub>
 class Layer
 {
 public:
@@ -187,7 +188,7 @@ public:
 		std::uint32_t out_stride = (n_out + 127) & ~127;
 
 		// TODO(petr): Randomize weights and biases.
-		// TODO(petr): Are there correctly allocated?
+		// TODO(petr): Are they correctly allocated?
 		cudaMalloc(&this->biases, n_out * sizeof(*this->biases));
 		cudaMalloc(&this->weights, n_out * in_stride * sizeof(*this->weights));
 		cudaMalloc(&this->out, n_out * this->batch_sz * sizeof(*this->out));
@@ -202,8 +203,6 @@ public:
 		cudaFree(&this->gradients);
 	}
 
-	// TODO(petr): Pass the input activation as a function argument, instead of a template argument.
-	template <float(*IN_ACTIVATION)(float) = _activation_stub>
 	const float *forward(const float *__restrict__ in)
 	{
 		constexpr std::uint32_t N_IN = 128;
@@ -230,7 +229,6 @@ public:
 		return this->out;
 	}
 
-	template <float(*IN_ACTIVATION_GRADIENT)(float) = _activation_stub>
 	void backward(Layer& in_layer)
 	{
 		constexpr std::uint32_t N_OUT = 128;
@@ -257,7 +255,6 @@ public:
 		ASSERT_CUDA_ERROR();
 	}
 
-	template <float(*IN_ACTIVATION)(float) = _activation_stub>
 	void update(const float *__restrict__ in, float learning_rate)
 	{
 		constexpr std::uint32_t N_IN = 128;
@@ -315,9 +312,9 @@ int main(void)
 	cudaEventRecord(start);
 	for (std::size_t epoch = 0; epoch < n_epochs; epoch++)
 	{
-//		layer.forward<>(in);
-//		layer.backward<>(in_layer);
-		layer.update<>(in, 0.1f);
+		layer.forward(in);
+//		layer.backward(in_layer);
+//		layer.update(in, 0.1f);
 	}
 	cudaEventRecord(stop);
 
