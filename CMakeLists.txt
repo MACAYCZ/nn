@@ -15,6 +15,11 @@ set(CMAKE_CUDA_EXTENSIONS ${CMAKE_CXX_EXTENSIONS})
 
 list(APPEND NVCC_OPTIONS -Xptxas=-v)
 
+add_library(nn SHARED nn.cu)
+set_property(TARGET nn PROPERTY CUDA_ARCHITECTURES 86-real 86-virtual)
+target_compile_options(nn PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${NVCC_OPTIONS}>)
+
 add_executable(test test.cu)
 set_property(TARGET test PROPERTY CUDA_ARCHITECTURES 86-real 86-virtual)
 target_compile_options(test PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${NVCC_OPTIONS}>)
+target_link_libraries(test PRIVATE nn)
